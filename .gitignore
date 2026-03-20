@@ -1,1 +1,5 @@
 .manifest.json
+
+# OpenSSL rehash-generated symlinks (produced by the deploy workflow; not source files)
+certs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].[0-9]
+certs/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].r[0-9]

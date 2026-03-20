@@ -1,0 +1,90 @@
+name: Deploy Certificates to dist
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+
+      - name: Clone certtools
+        run: git clone https://github.com/cfms-dev/certtools.git /tmp/certtools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install certtools dependencies
+        run: pip install cryptography
+
+      - name: Validate certificates using certtools
+        run: |
+          # Use the cryptography library (certtools dependency) to validate every
+          # PEM file in certs/ before they are rehashed and published to dist.
+          python - <<'EOF'
+          import glob, sys
+          from cryptography import x509
+
+          errors = []
+          for pem_file in sorted(glob.glob("certs/*.pem")):
+              with open(pem_file, "rb") as f:
+                  try:
+                      cert = x509.load_pem_x509_certificate(f.read())
+                      print(f"OK  {pem_file}: {cert.subject.rfc4514_string()}")
+                  except Exception as e:
+                      errors.append(f"ERR {pem_file}: {e}")
+
+          if errors:
+              for msg in errors:
+                  print(msg, file=sys.stderr)
+              sys.exit(1)
+          EOF
+
+      - name: Generate certificate hash symlinks
+        run: |
+          # Use OpenSSL rehash to create <hash>.[0-9] symlinks for certificates
+          # and <hash>.r[0-9] symlinks for CRLs in the certs/ directory
+          openssl rehash certs/
+
+      - name: Collect certificate artifacts
+        run: |
+          mkdir -p /tmp/dist
+
+          # Copy hash-named cert files (<hash>.[0-9]) and CRL files (<hash>.r[0-9]),
+          # resolving any symlinks so the dist branch contains real file content.
+          find certs/ -maxdepth 1 \( -type f -o -type l \) \
+            | grep -E '[0-9a-f]{8}\.(r?[0-9])$' \
+            | while IFS= read -r f; do
+                cp -L "$f" /tmp/dist/
+              done
+
+          echo "Certificate artifacts to deploy:"
+          ls -la /tmp/dist/
+
+      - name: Deploy to dist branch
+        run: |
+          cd /tmp/dist
+
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .
+          git commit -m "Deploy certificates from ${GITHUB_SHA::7}"
+
+          git remote add origin \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+
+          # Force-push to dist as an orphan branch (no shared history with main)
+          git push origin HEAD:dist --force
+
