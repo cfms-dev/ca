@@ -14,6 +14,15 @@ Additionally, clients can be configured to accept Certificate Revocation Lists
 (CRLs) in PEM format, provided they follow a specific naming format when 
 joining this repository. 
 
+## Repository Structure
+
+```
+certs/          — Source PEM certificate files (root CA, intermediate CAs, CRLs)
+.github/
+  workflows/
+    deploy.yml  — Automated deployment workflow
+```
+
 ## Naming Convention
 
 The `c_rehash` tool provided by OpenSSL can be used to quickly generate certificate 
@@ -21,6 +30,20 @@ files that meet the naming requirements. However, if the aforementioned tools ar
 not available on your platform, the same effect can be achieved manually. 
 
 For more information, please refer to OpenSSL's naming conventions on this topic.
+
+## Deployment
+
+A GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically triggers on
+every push to `main` and on a daily schedule. Scheduled runs only proceed when the
+workflow's 21-day cadence check passes, so certificate/CRL publishing occurs every
+21 days. It validates source certificates, generates a CRL for the intermediate CA
+(excluding the root CA), and uses `openssl rehash` to produce hash-named certificate
+files (`<hash>.[0-9]` for certificates, `<hash>.r[0-9]` for CRLs) from the source
+PEM files in `certs/`, then force-pushes those artifacts to the `dist` branch as an
+orphan branch with no shared history from `main`.
+
+Clients and servers that reference this repository as a Git submodule should point
+to the `dist` branch, which exposes only the certificate artifacts.
 
 ## CONTRIBUTION
 
