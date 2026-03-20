@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: '0 0 * * *'
 
 permissions:
   contents: write
@@ -11,23 +13,47 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      CRL_INTERVAL_DAYS: '21'
 
     steps:
+      - name: Check 21-day cadence for scheduled runs
+        id: cadence
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          days_since_epoch=$(( $(date -u +%s) / 86400 ))
+          if [ $(( days_since_epoch % $CRL_INTERVAL_DAYS )) -eq 0 ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Scheduled run is on 21-day cadence."
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping scheduled run: not on 21-day cadence."
+          fi
+
       - name: Checkout main branch
+        if: steps.cadence.outputs.should_run == 'true'
         uses: actions/checkout@v4
 
       - name: Clone certtools
+        if: steps.cadence.outputs.should_run == 'true'
         run: git clone https://github.com/cfms-dev/certtools.git /tmp/certtools
 
       - name: Set up Python
+        if: steps.cadence.outputs.should_run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Install certtools dependencies
+        if: steps.cadence.outputs.should_run == 'true'
         run: pip install cryptography
 
       - name: Validate certificates using certtools
+        if: steps.cadence.outputs.should_run == 'true'
         run: |
           # Use the cryptography library (certtools dependency) to validate every
           # PEM file in certs/ before they are rehashed and published to dist.
@@ -50,13 +76,91 @@ jobs:
               sys.exit(1)
           EOF
 
+      - name: Generate CRL for intermediate CA
+        if: steps.cadence.outputs.should_run == 'true'
+        env:
+          INTERMEDIATE_CA_KEY_PEM: ${{ secrets.INTERMEDIATE_CA_KEY_PEM }}
+        run: |
+          python - <<'EOF'
+          import datetime
+          import os
+          import sys
+          from cryptography import x509
+          from cryptography.exceptions import InvalidSignature
+          from cryptography.hazmat.primitives.asymmetric import ec, rsa, padding
+          from cryptography.hazmat.primitives import hashes, serialization
+
+          crl_interval_days = int(os.getenv("CRL_INTERVAL_DAYS", "21"))
+          key_pem = os.getenv("INTERMEDIATE_CA_KEY_PEM", "").strip()
+          if not key_pem:
+              print(
+                  "Missing secret INTERMEDIATE_CA_KEY_PEM for CRL generation.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          with open("certs/intermediate_ca.pem", "rb") as f:
+              int_cert = x509.load_pem_x509_certificate(f.read())
+
+          is_self_signed = False
+          if int_cert.subject == int_cert.issuer:
+              pub = int_cert.public_key()
+              try:
+                  if isinstance(pub, rsa.RSAPublicKey):
+                      pub.verify(
+                          int_cert.signature,
+                          int_cert.tbs_certificate_bytes,
+                          padding.PKCS1v15(),
+                          int_cert.signature_hash_algorithm,
+                      )
+                  elif isinstance(pub, ec.EllipticCurvePublicKey):
+                      pub.verify(
+                          int_cert.signature,
+                          int_cert.tbs_certificate_bytes,
+                          ec.ECDSA(int_cert.signature_hash_algorithm),
+                      )
+                  else:
+                      raise TypeError("Unsupported public key type for self-signed check.")
+                  is_self_signed = True
+              except InvalidSignature:
+                  is_self_signed = False
+
+          if is_self_signed:
+              print(
+                  "intermediate_ca.pem is self-signed (root CA). "
+                  "CRL generation must exclude root CA.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          int_key = serialization.load_pem_private_key(
+              key_pem.encode("utf-8"), password=None
+          )
+
+          now = datetime.datetime.now(datetime.timezone.utc)
+          crl = (
+              x509.CertificateRevocationListBuilder()
+              .issuer_name(int_cert.subject)
+              .last_update(now)
+              .next_update(now + datetime.timedelta(days=crl_interval_days))
+              .sign(private_key=int_key, algorithm=hashes.SHA256())
+          )
+
+          with open("certs/intermediate_ca.crl.pem", "wb") as f:
+              f.write(crl.public_bytes(serialization.Encoding.PEM))
+
+          print("Generated certs/intermediate_ca.crl.pem")
+          EOF
+
       - name: Generate certificate hash symlinks
+        if: steps.cadence.outputs.should_run == 'true'
         run: |
           # Use OpenSSL rehash to create <hash>.[0-9] symlinks for certificates
           # and <hash>.r[0-9] symlinks for CRLs in the certs/ directory
           openssl rehash certs/
 
       - name: Collect certificate artifacts
+        if: steps.cadence.outputs.should_run == 'true'
         run: |
           mkdir -p /tmp/dist
 
@@ -72,6 +176,7 @@ jobs:
           ls -la /tmp/dist/
 
       - name: Deploy to dist branch
+        if: steps.cadence.outputs.should_run == 'true'
         run: |
           cd /tmp/dist
 
@@ -87,4 +192,3 @@ jobs:
 
           # Force-push to dist as an orphan branch (no shared history with main)
           git push origin HEAD:dist --force
-

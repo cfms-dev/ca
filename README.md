@@ -34,7 +34,10 @@ For more information, please refer to OpenSSL's naming conventions on this topic
 ## Deployment
 
 A GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically triggers on
-every push to `main`. It uses `openssl rehash` to produce hash-named certificate
+every push to `main` and on a daily schedule. Scheduled runs only proceed when the
+workflow's 21-day cadence check passes, so certificate/CRL publishing occurs every
+21 days. It validates source certificates, generates a CRL for the intermediate CA
+(excluding the root CA), and uses `openssl rehash` to produce hash-named certificate
 files (`<hash>.[0-9]` for certificates, `<hash>.r[0-9]` for CRLs) from the source
 PEM files in `certs/`, then force-pushes those artifacts to the `dist` branch as an
 orphan branch with no shared history from `main`.
